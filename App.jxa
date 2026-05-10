@@ -13,15 +13,27 @@ import {
   getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot 
 } from 'firebase/firestore';
 
-// --- FIREBASE SETUP ---
-// ACHTUNG: Für dein eigenes Projekt musst du hier deine eigene Config eintragen!
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-  // apiKey: "DEIN_API_KEY",
-  // authDomain: "DEIN_PROJEKT.firebaseapp.com",
-  // projectId: "DEIN_PROJEKT",
-  // storageBucket: "DEIN_PROJEKT.appspot.com",
-  // messagingSenderId: "123456789",
-  // appId: "DEINE_APP_ID"
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAnalytics } from "firebase/analytics";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyBtMDplKTUoYJ1FuyaV1d8iOvFPgUitgD0",
+  authDomain: "job-tracker-familie.firebaseapp.com",
+  projectId: "job-tracker-familie",
+  storageBucket: "job-tracker-familie.firebasestorage.app",
+  messagingSenderId: "562756649850",
+  appId: "1:562756649850:web:c9c697b06e0672e1d34cc3",
+  measurementId: "G-58S1QP7ZFG"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
 };
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
