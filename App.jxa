@@ -1,0 +1,1130 @@
+```react
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  Plus, Check, Trash2, Calendar, ChevronLeft, ChevronRight, 
+  BarChart3, Edit2, X, Sparkles, Loader2, Cloud, User, Smartphone, 
+  CreditCard, Printer, FileText, Download, Camera, Repeat, ArrowDownRight, ArrowUpRight
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, signInAnonymously, onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot 
+} from 'firebase/firestore';
+
+// --- FIREBASE SETUP ---
+// Deine Original-Daten, fest eingebaut
+const firebaseConfig = {
+  apiKey: "AIzaSyBtMDplKTUoYJ1FuyaV1d8iOvFPgUitgD0",
+  authDomain: "job-tracker-familie.firebaseapp.com",
+  projectId: "job-tracker-familie",
+  storageBucket: "job-tracker-familie.firebasestorage.app",
+  messagingSenderId: "562756649850",
+  appId: "1:562756649850:web:c9c697b06e0672e1d34cc3",
+  measurementId: "G-58S1QP7ZFG"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const MY_APP_ID = 'familien-job-tracker-1'; 
+
+const App = () => {
+  // --- STATE ---
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [dbError, setDbError] = useState(null);
+  
+  const [activeTab, setActiveTab] = useState('current'); 
+  const [viewDate, setViewDate] = useState(new Date()); 
+  
+  const [tasks, setTasks] = useState([]);
+  const [editingTask, setEditingTask] = useState(null);
+
+  // User Settings & Notifications
+  const [userName, setUserName] = useState(() => localStorage.getItem('userName') || '');
+  const [showSettings, setShowSettings] = useState(false);
+  const [showInvoice, setShowInvoice] = useState(false);
+  const [lastViewedTasks, setLastViewedTasks] = useState(() => parseInt(localStorage.getItem('lastViewedTasks') || '0', 10));
+
+  // Inputs Haushalt
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskDate, setNewTaskDate] = useState('');
+  
+  // Inputs Putzen (jetzt in Minuten)
+  const [cleanDate, setCleanDate] = useState('');
+  const [cleanDuration, setCleanDuration] = useState(''); 
+
+  // Inputs Ausgaben/Schulden
+  const [expenseTitle, setExpenseTitle] = useState('');
+  const [expenseDate, setExpenseDate] = useState('');
+  const [expenseAmount, setExpenseAmount] = useState('');
+  const [expenseType, setExpenseType] = useState('plus'); 
+
+  // Foto State
+  const [selectedImage, setSelectedImage] = useState(null);
+  const fileInputRef = useRef(null);
+
+  // Konstanten
+  const RATE_STANDARD = 15; // Pro Stunde
+  const RATE_CLEANING = 13; // Pro Stunde
+  const WEEKLY_GOAL_MINS = 3.5 * 60; // 210 Minuten
+
+  // --- AUTH ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        await signInAnonymously(auth);
+      } catch (e) {
+        console.error("Auth Error:", e);
+        setDbError("Anmeldung fehlgeschlagen. Bitte prüfe deine Internetverbindung.");
+        setLoading(false);
+      }
+    };
+    initAuth();
+    return onAuthStateChanged(auth, setUser);
+  }, []);
+
+  // --- LIVE DATA ---
+  useEffect(() => {
+    if (!user) return;
+    const q = collection(db, 'artifacts', MY_APP_ID, 'public', 'data');
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const loaded = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+      setTasks(loaded);
+      setLoading(false);
+      setDbError(null);
+    }, (error) => {
+      console.error("Datenbank Fehler:", error);
+      setDbError("Datenbank blockiert. Hast du in Firebase 'Firestore' aktiviert und Regeln auf Testmodus?");
+      setLoading(false); 
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  // Save Name & Notification Logic
+  useEffect(() => {
+    localStorage.setItem('userName', userName);
+  }, [userName]);
+
+  useEffect(() => {
+    if (activeTab === 'current') {
+      const pendingTasksCount = tasks.filter(t => t.type === 'standard' && t.status === 'pending').length;
+      setLastViewedTasks(pendingTasksCount);
+      localStorage.setItem('lastViewedTasks', pendingTasksCount.toString());
+    }
+  }, [activeTab, tasks]);
+
+  // --- HELPER: ROBUST DATE PARSING ---
+  const getValidDate = (task) => {
+    if (task.status === 'done' && task.completedDate) {
+      const d = new Date(task.completedDate);
+      if (!isNaN(d.getTime()) && d.getFullYear() > 2000) return d;
+    }
+    if (task.dueDate) {
+      const d = new Date(task.dueDate);
+      if (!isNaN(d.getTime()) && d.getFullYear() > 2000) return d;
+    }
+    if (task.createdAt) {
+      const d = new Date(task.createdAt);
+      if (!isNaN(d.getTime()) && d.getFullYear() > 2000) return d;
+    }
+    return new Date();
+  };
+
+  // Sync Input Dates
+  useEffect(() => {
+    const year = viewDate.getFullYear();
+    const month = String(viewDate.getMonth() + 1).padStart(2, '0');
+    const today = new Date();
+    
+    if (today.getMonth() === viewDate.getMonth() && today.getFullYear() === viewDate.getFullYear()) {
+        const todayStr = today.toISOString().split('T')[0];
+        setNewTaskDate(todayStr);
+        setCleanDate(todayStr);
+        setExpenseDate(todayStr);
+    } else {
+        const firstOfMonth = `${year}-${month}-01`;
+        setNewTaskDate(firstOfMonth);
+        setCleanDate(firstOfMonth);
+        setExpenseDate(firstOfMonth);
+    }
+  }, [viewDate]);
+
+  const getWeekNumber = (d) => {
+    const date = new Date(d);
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() + 4 - (date.getDay() || 7));
+    const yearStart = new Date(date.getFullYear(), 0, 1);
+    return Math.ceil((((date - yearStart) / 86400000) + 1) / 7);
+  };
+
+  const formatMoney = (val) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(val || 0);
+  const formatDate = (dateObj) => dateObj.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' });
+
+  const changeMonth = (delta) => {
+    const newDate = new Date(viewDate);
+    newDate.setMonth(newDate.getMonth() + delta);
+    setViewDate(newDate);
+  };
+
+  // BILD KOMPRESSION FÜR DIE DATENBANK
+  const handleImageUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+        const MAX_WIDTH = 800;
+        const MAX_HEIGHT = 800;
+
+        if (width > height) {
+          if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
+        } else {
+          if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.6);
+        setSelectedImage(compressedDataUrl);
+      };
+      img.src = event.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const copyInvoiceText = () => {
+    let text = `--- ABRECHNUNG: ${viewDate.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })} ---\n\n`;
+    
+    text += `HAUSHALT (${formatMoney(RATE_STANDARD)}/Std):\n`;
+    currentMonthTasks.filter(t => t.type === 'standard' && t.status === 'done').forEach(t => {
+      text += `- ${formatDate(getValidDate(t))}: ${t.title} (${Number(t.duration)} Min.) = ${formatMoney((Number(t.duration) / 60) * RATE_STANDARD)}\n`;
+    });
+    text += `Summe Haushalt: ${stats.stdMins} Min. = ${formatMoney(stats.moneyLaborStandard)}\n\n`;
+
+    text += `PUTZEN (${formatMoney(RATE_CLEANING)}/Std):\n`;
+    currentMonthTasks.filter(t => t.type === 'cleaning').forEach(t => {
+      text += `- ${formatDate(getValidDate(t))}: ${t.title} (${Number(t.duration)} Min.) = ${formatMoney((Number(t.duration) / 60) * RATE_CLEANING)}\n`;
+    });
+    text += `Summe Putzen: ${stats.cleanMins} Min. = ${formatMoney(stats.moneyLaborCleaning)}\n\n`;
+
+    text += `GELD (Auslagen / Schulden):\n`;
+    currentMonthTasks.filter(t => t.type === 'expense').forEach(t => {
+      const amount = Number(t.amount);
+      const isDebt = t.expenseType === 'minus';
+      text += `- ${formatDate(getValidDate(t))}: ${t.title} = ${isDebt ? '-' : '+'}${formatMoney(amount)}\n`;
+    });
+    text += `Summe Auslagen: ${formatMoney(stats.totalExpensesPlus)}\n`;
+    text += `Summe Schulden: -${formatMoney(stats.totalExpensesMinus)}\n\n`;
+
+    text += `========================\n`;
+    text += `GESAMTBETRAG: ${formatMoney(stats.totalPayout)}\n`;
+    text += `========================\n`;
+
+    try {
+      document.execCommand('copy');
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand("Copy");
+      textArea.remove();
+      alert("Abrechnung wurde kopiert!");
+    } catch (err) {
+      alert("Kopieren fehlgeschlagen.");
+    }
+  };
+
+  const handlePrint = () => {
+    try {
+      window.print();
+    } catch (e) {
+      alert("Drucken fehlgeschlagen. Nutze den Kopieren Button.");
+    }
+  };
+
+  // --- FILTER & MATH LOGIC ---
+
+  const currentMonthTasks = useMemo(() => {
+    return tasks.filter(t => {
+      const d = getValidDate(t);
+      return d.getMonth() === viewDate.getMonth() && d.getFullYear() === viewDate.getFullYear();
+    });
+  }, [tasks, viewDate]);
+
+  const pendingCount = tasks.filter(t => t.type === 'standard' && t.status === 'pending').length;
+  const newTasksBadge = activeTab !== 'current' && pendingCount > lastViewedTasks ? pendingCount - lastViewedTasks : 0;
+
+  const stats = useMemo(() => {
+    const done = currentMonthTasks.filter(t => t.status === 'done');
+    
+    const stdMins = done.filter(t => t.type === 'standard').reduce((a, b) => a + (Number(b.duration) || 0), 0);
+    const cleanMins = done.filter(t => t.type === 'cleaning').reduce((a, b) => a + (Number(b.duration) || 0), 0);
+    
+    const expenses = done.filter(t => t.type === 'expense');
+    const totalExpensesPlus = expenses.filter(t => t.expenseType !== 'minus').reduce((a, b) => a + (Number(b.amount) || 0), 0);
+    const totalExpensesMinus = expenses.filter(t => t.expenseType === 'minus').reduce((a, b) => a + (Number(b.amount) || 0), 0);
+    const netExpenses = totalExpensesPlus - totalExpensesMinus;
+    
+    const moneyLaborStandard = (stdMins / 60) * RATE_STANDARD;
+    const moneyLaborCleaning = (cleanMins / 60) * RATE_CLEANING;
+    const totalLabor = moneyLaborStandard + moneyLaborCleaning;
+    
+    return {
+      totalPayout: totalLabor + netExpenses,
+      moneyLaborStandard,
+      moneyLaborCleaning,
+      totalExpensesPlus,
+      totalExpensesMinus,
+      netExpenses,
+      stdMins,
+      cleanMins,
+      totalMins: stdMins + cleanMins
+    };
+  }, [currentMonthTasks]);
+
+  const weeksData = useMemo(() => {
+    const weeks = {};
+    const relevant = currentMonthTasks.filter(t => t.type === 'standard');
+    
+    relevant.forEach(t => {
+      const d = getValidDate(t);
+      const w = getWeekNumber(d);
+      if (!weeks[w]) weeks[w] = { done: 0, total: 0 };
+      if (t.status === 'done') weeks[w].done += (Number(t.duration) || 0); 
+    });
+    return weeks;
+  }, [currentMonthTasks]);
+
+  const historyData = useMemo(() => {
+    const months = {};
+    tasks.filter(t => t.status === 'done').forEach(t => {
+      const d = getValidDate(t);
+      if (d.getFullYear() < 2024) return;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      if (!months[key]) months[key] = { money: 0, mins: 0, dateObj: d };
+      
+      if (t.type === 'expense') {
+        const amount = Number(t.amount) || 0;
+        if (t.expenseType === 'minus') {
+           months[key].money -= amount;
+        } else {
+           months[key].money += amount;
+        }
+      } else {
+        const rate = t.type === 'cleaning' ? RATE_CLEANING : RATE_STANDARD;
+        months[key].money += ((Number(t.duration) || 0) / 60) * rate;
+        months[key].mins += (Number(t.duration) || 0);
+      }
+    });
+    return Object.entries(months).sort((a, b) => b[0].localeCompare(a[0]));
+  }, [tasks]);
+
+  // --- ACTIONS ---
+
+  const addTask = async (e) => {
+    e.preventDefault();
+    if (!newTaskTitle.trim()) return;
+    const targetDate = newTaskDate || new Date().toISOString().split('T')[0];
+
+    try {
+      await addDoc(collection(db, 'artifacts', MY_APP_ID, 'public', 'data'), {
+        title: newTaskTitle,
+        type: 'standard',
+        status: 'pending',
+        routineType: 'none',
+        routineInterval: 1,
+        routineEndDate: null,
+        duration: 0,
+        dueDate: targetDate,
+        completedDate: null,
+        photoUrl: null,
+        createdAt: new Date().toISOString(),
+        createdBy: userName || 'Unbekannt'
+      });
+      setNewTaskTitle('');
+    } catch (e) {
+      alert("Hinzufügen fehlgeschlagen: " + e.message);
+    }
+  };
+
+  const addCleaning = async () => {
+    const mins = parseInt(cleanDuration, 10);
+    if (isNaN(mins) || mins <= 0) return;
+    const targetDate = cleanDate || new Date().toISOString().split('T')[0];
+
+    try {
+      await addDoc(collection(db, 'artifacts', MY_APP_ID, 'public', 'data'), {
+        title: 'Sonntagsputz',
+        type: 'cleaning',
+        status: 'done',
+        duration: mins,
+        dueDate: targetDate,
+        completedDate: targetDate,
+        photoUrl: null,
+        createdAt: new Date().toISOString(),
+        createdBy: userName || 'Unbekannt'
+      });
+      setCleanDuration('');
+      alert("Putzzeit gespeichert!");
+    } catch (e) {
+      alert("Fehler beim Speichern: " + e.message);
+    }
+  };
+
+  const addExpense = async () => {
+    const amount = parseFloat(expenseAmount.replace(',', '.'));
+    if (isNaN(amount) || amount <= 0 || !expenseTitle.trim()) return;
+    const targetDate = expenseDate || new Date().toISOString().split('T')[0];
+
+    try {
+      await addDoc(collection(db, 'artifacts', MY_APP_ID, 'public', 'data'), {
+        title: expenseTitle,
+        type: 'expense',
+        status: 'done',
+        amount: amount,
+        expenseType: expenseType, 
+        dueDate: targetDate,
+        completedDate: targetDate,
+        createdAt: new Date().toISOString(),
+        createdBy: userName || 'Unbekannt'
+      });
+      setExpenseTitle('');
+      setExpenseAmount('');
+      setExpenseType('plus'); 
+      alert(expenseType === 'plus' ? "Ausgabe eingetragen!" : "Schulden eingetragen!");
+    } catch (e) {
+      alert("Fehler beim Eintragen: " + e.message);
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!editingTask) return;
+    
+    try {
+      const docRef = doc(db, 'artifacts', MY_APP_ID, 'public', 'data', editingTask.id);
+      
+      if (editingTask.type === 'expense') {
+        const amount = parseFloat(String(editingTask.amount).replace(',', '.'));
+        await updateDoc(docRef, {
+          amount: amount,
+          title: editingTask.title,
+          expenseType: editingTask.expenseType || 'plus',
+          dueDate: editingTask.dueDate,
+          completedDate: editingTask.dueDate 
+        });
+      } else {
+        const mins = parseInt(String(editingTask.duration), 10) || 0;
+        let finalCompletedDate = null;
+        let isNewlyCompleted = false;
+
+        if (mins > 0) {
+            finalCompletedDate = editingTask.completedDate || editingTask.dueDate || new Date().toISOString().split('T')[0];
+            if (editingTask.status === 'pending') {
+               isNewlyCompleted = true;
+            }
+        }
+
+        const rType = editingTask.routineType || 'none';
+        const rInterval = parseInt(editingTask.routineInterval, 10) || 1;
+        const rEndDate = editingTask.routineEndDate || null;
+
+        await updateDoc(docRef, {
+          duration: mins,
+          status: mins > 0 ? 'done' : 'pending',
+          completedDate: finalCompletedDate,
+          dueDate: editingTask.dueDate,
+          routineType: rType,
+          routineInterval: rInterval,
+          routineEndDate: rEndDate,
+          photoUrl: selectedImage || editingTask.photoUrl || null
+        });
+
+        // ROUTINEN-LOGIK
+        if (isNewlyCompleted && rType !== 'none') {
+            const currentDueDate = new Date(editingTask.dueDate || new Date());
+            const nextDueDate = new Date(currentDueDate);
+            
+            if (rType === 'days') {
+              nextDueDate.setDate(nextDueDate.getDate() + rInterval);
+            } else if (rType === 'weeks') {
+              nextDueDate.setDate(nextDueDate.getDate() + (rInterval * 7));
+            }
+
+            let shouldCreate = true;
+            if (rEndDate) {
+                const endDateObj = new Date(rEndDate);
+                if (nextDueDate > endDateObj) {
+                    shouldCreate = false;
+                }
+            }
+
+            if (shouldCreate) {
+              await addDoc(collection(db, 'artifacts', MY_APP_ID, 'public', 'data'), {
+                title: editingTask.title,
+                type: 'standard',
+                status: 'pending',
+                routineType: rType,
+                routineInterval: rInterval,
+                routineEndDate: rEndDate,
+                duration: 0,
+                dueDate: nextDueDate.toISOString().split('T')[0],
+                completedDate: null,
+                photoUrl: null,
+                createdAt: new Date().toISOString(),
+                createdBy: userName || 'Unbekannt'
+              });
+            }
+        }
+      }
+      setEditingTask(null);
+      setSelectedImage(null);
+    } catch (e) {
+      console.error(e);
+      alert("Speichern fehlgeschlagen: " + e.message);
+    }
+  };
+
+  const deleteTask = async (id, e) => {
+    if(e) e.stopPropagation(); 
+    if (!id) return;
+    
+    if (window.confirm("Diesen Eintrag wirklich unwiderruflich löschen?")) {
+      try {
+        const docRef = doc(db, 'artifacts', MY_APP_ID, 'public', 'data', id);
+        await deleteDoc(docRef);
+      } catch (error) {
+        console.error("Delete Error: ", error);
+        alert("Löschen fehlgeschlagen: " + error.message);
+      }
+    }
+  };
+
+  // --- RENDER ---
+
+  if (loading) return (
+    <div className="h-screen flex flex-col items-center justify-center bg-[#F2F2F7] text-blue-600 gap-2">
+      <Loader2 className="animate-spin w-8 h-8" />
+      <span className="text-sm font-medium text-gray-400">Lade Daten...</span>
+    </div>
+  );
+
+  // FEHLER SCREEN ANZEIGEN
+  if (dbError) return (
+    <div className="h-screen flex flex-col items-center justify-center bg-[#F2F2F7] p-6 text-center">
+      <div className="bg-red-50 text-red-600 p-6 rounded-3xl border border-red-200 shadow-sm max-w-sm">
+        <h3 className="font-bold text-xl mb-2">Oh nein!</h3>
+        <p className="text-sm opacity-90 mb-4">{dbError}</p>
+        <button onClick={() => window.location.reload()} className="bg-red-600 hover:bg-red-700 text-white px-4 py-3 rounded-xl text-sm font-bold w-full transition-colors">App neu laden</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-[#F2F2F7] text-[#1C1C1E] font-sans pb-32">
+      
+      {/* === APP VIEW === */}
+      <div className={showInvoice ? "hidden" : "block"}>
+        {/* HEADER */}
+        <div className="bg-white sticky top-0 z-50 border-b border-gray-200 shadow-sm">
+          <div className="flex justify-between items-center px-4 py-3">
+            <div className="w-8 h-8 bg-black text-white rounded-lg flex items-center justify-center font-bold">J</div>
+            
+            <div className="flex items-center gap-2 sm:gap-4 bg-gray-100 rounded-full px-1 py-1">
+              <button onClick={() => changeMonth(-1)} className="p-1 hover:bg-white hover:shadow rounded-full transition"><ChevronLeft size={18}/></button>
+              <span className="font-semibold text-sm w-28 sm:w-32 text-center select-none truncate">
+                {viewDate.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })}
+              </span>
+              <button onClick={() => changeMonth(1)} className="p-1 hover:bg-white hover:shadow rounded-full transition"><ChevronRight size={18}/></button>
+            </div>
+
+            <div 
+              className="flex items-center justify-center w-8 h-8 cursor-pointer relative"
+              onClick={() => setShowSettings(true)}
+            >
+              <div className="relative">
+                  <Cloud size={20} className={showSettings ? "text-blue-600" : "text-gray-400"} />
+                  <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500 border border-white"></span>
+                  </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <main className="max-w-xl mx-auto p-4 space-y-6">
+
+          {/* SETTINGS MODAL */}
+          {showSettings && (
+            <div className="bg-white rounded-2xl p-4 shadow-lg border border-blue-100 animate-in fade-in slide-in-from-top-4 mb-4">
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <h3 className="font-bold text-gray-800 flex items-center gap-2"><Smartphone size={16}/> Einstellungen</h3>
+                </div>
+                <button onClick={() => setShowSettings(false)}><X size={16} className="text-gray-400"/></button>
+              </div>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="text-xs font-bold text-gray-500 uppercase ml-1">Dein Name</label>
+                  <div className="flex gap-2 mt-1">
+                    <div className="bg-gray-100 p-2 rounded-lg"><User size={20} className="text-gray-500"/></div>
+                    <input 
+                      type="text" 
+                      placeholder="z.B. Ich oder Mama" 
+                      className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                      value={userName}
+                      onChange={(e) => setUserName(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* STATS CARD */}
+          <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-200 relative overflow-hidden">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <p className="text-gray-500 font-medium text-xs uppercase tracking-wider mb-1">Auszahlung ({viewDate.toLocaleDateString('de-DE', { month: 'short' })})</p>
+                <h1 className="text-4xl font-extrabold tracking-tight text-[#1C1C1E]">
+                  {formatMoney(stats.totalPayout)}
+                </h1>
+              </div>
+              <button 
+                onClick={() => setShowInvoice(true)}
+                className="bg-gray-100 hover:bg-gray-200 text-gray-700 p-2.5 rounded-full transition-colors flex-shrink-0"
+                title="Abrechnung anzeigen"
+              >
+                <FileText size={20} />
+              </button>
+            </div>
+            
+            <div className="flex gap-2 text-xs">
+              <div className="bg-blue-50 text-blue-700 px-2 py-1.5 rounded-lg font-medium flex-1 text-center truncate">
+                🏠 {stats.stdMins} Min.
+              </div>
+              <div className="bg-purple-50 text-purple-700 px-2 py-1.5 rounded-lg font-medium flex-1 text-center truncate">
+                🧹 {stats.cleanMins} Min.
+              </div>
+              <div className="bg-orange-50 text-orange-700 px-2 py-1.5 rounded-lg font-medium flex-1 text-center truncate">
+                💳 {stats.netExpenses >= 0 ? '+' : ''}{formatMoney(stats.netExpenses)}
+              </div>
+            </div>
+          </div>
+
+          {/* TABS */}
+          <div className="bg-gray-200/80 p-1 rounded-xl flex font-medium text-xs sm:text-sm shadow-inner relative">
+            <button onClick={() => setActiveTab('current')} className={`flex-1 py-1.5 sm:py-2 rounded-lg transition-all truncate px-1 relative ${activeTab === 'current' ? 'bg-white shadow text-black' : 'text-gray-500'}`}>
+              Jobs
+              {newTasksBadge > 0 && (
+                <span className="absolute top-1 right-2 w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
+              )}
+            </button>
+            <button onClick={() => setActiveTab('cleaning')} className={`flex-1 py-1.5 sm:py-2 rounded-lg transition-all truncate px-1 ${activeTab === 'cleaning' ? 'bg-white shadow text-black' : 'text-gray-500'}`}>Putzen</button>
+            <button onClick={() => setActiveTab('expenses')} className={`flex-1 py-1.5 sm:py-2 rounded-lg transition-all truncate px-1 ${activeTab === 'expenses' ? 'bg-white shadow text-black' : 'text-gray-500'}`}>Geld</button>
+            <button onClick={() => setActiveTab('history')} className={`flex-1 py-1.5 sm:py-2 rounded-lg transition-all truncate px-1 ${activeTab === 'history' ? 'bg-white shadow text-black' : 'text-gray-500'}`}>Archiv</button>
+          </div>
+
+          {/* --- TAB: HAUSHALT --- */}
+          {activeTab === 'current' && (
+            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2">
+              
+              {/* Wochenziele */}
+              <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200 space-y-4">
+                <h3 className="text-sm font-bold text-gray-800 flex items-center gap-2">
+                  <BarChart3 size={16} className="text-blue-500" />
+                  Wochenziele (Haushalt)
+                </h3>
+                <div className="space-y-3">
+                  {Object.keys(weeksData).sort().map(w => {
+                    const d = weeksData[w];
+                    const reached = d.done >= WEEKLY_GOAL_MINS;
+                    const pct = Math.min((d.done / WEEKLY_GOAL_MINS)*100, 100);
+                    return (
+                      <div key={w}>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="font-semibold text-gray-500">KW {w}</span>
+                          <span className={reached ? 'text-green-600 font-bold' : 'text-gray-600'}>{d.done} / {WEEKLY_GOAL_MINS} Min.</span>
+                        </div>
+                        <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                          <div className={`h-full rounded-full ${reached ? 'bg-green-500' : 'bg-blue-500'}`} style={{width: `${pct}%`}} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                  {Object.keys(weeksData).length === 0 && <p className="text-xs text-gray-400 italic">Keine Aufgaben in diesem Monat.</p>}
+                </div>
+              </div>
+
+              {/* Input */}
+              <div className="bg-white rounded-2xl p-2 shadow-sm border border-gray-200 flex gap-2 items-center pr-2">
+                <input 
+                  type="text" 
+                  className="flex-1 bg-transparent px-3 py-2 outline-none w-full" 
+                  placeholder="Aufgabe hinzufügen..." 
+                  value={newTaskTitle}
+                  onChange={(e) => setNewTaskTitle(e.target.value)}
+                />
+                <input 
+                  type="date" 
+                  className="bg-gray-50 rounded-lg px-2 py-1 text-xs outline-none border-none text-gray-500 w-24 sm:w-auto"
+                  value={newTaskDate}
+                  onChange={(e) => setNewTaskDate(e.target.value)}
+                />
+                <button onClick={addTask} className="bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700 transition flex-shrink-0"><Plus size={20}/></button>
+              </div>
+
+              {/* Liste */}
+              <div className="space-y-2">
+                <h3 className="font-bold text-gray-800 px-1 mt-2 flex items-center gap-2">
+                  Aufgabenliste 
+                  {newTasksBadge > 0 && <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full">{newTasksBadge} Neu</span>}
+                </h3>
+                {currentMonthTasks.filter(t => t.type === 'standard').length === 0 && <p className="text-gray-400 text-sm px-1 italic">Nichts in diesem Monat.</p>}
+                
+                {currentMonthTasks.filter(t => t.type === 'standard').sort((a,b) => (a.status === b.status ? 0 : a.status === 'done' ? 1 : -1)).map(task => (
+                  <div key={task.id} className={`p-4 rounded-xl border flex flex-col gap-2 transition-all ${task.status === 'done' ? 'bg-gray-50 border-gray-100 opacity-90' : 'bg-white border-gray-200 shadow-sm'}`}>
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1 min-w-0 pr-2 cursor-pointer" onClick={() => {setEditingTask(task); setSelectedImage(task.photoUrl || null);}}>
+                        <p className={`font-semibold truncate ${task.status === 'done' ? 'line-through text-gray-500' : 'text-gray-800'}`}>
+                          {task.routineType && task.routineType !== 'none' && <Repeat size={12} className="inline mr-1 text-blue-500" />}
+                          {task.title}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-400 mt-1">
+                          <span>{formatDate(getValidDate(task))}</span>
+                          {task.status === 'done' && <span>• {task.duration} Min.</span>}
+                          {task.createdBy && <span className="bg-gray-100 px-1.5 rounded text-gray-500 text-[10px] uppercase font-bold tracking-wide">{task.createdBy}</span>}
+                        </div>
+                      </div>
+                      <div className="flex gap-1 sm:gap-2 flex-shrink-0 items-center">
+                        {task.status === 'done' ? (
+                          <button onClick={() => {setEditingTask(task); setSelectedImage(task.photoUrl || null);}} className="p-2 text-blue-400 hover:bg-blue-50 rounded-full"><Edit2 size={16} /></button>
+                        ) : (
+                          <button onClick={() => {setEditingTask({...task, duration: ''}); setSelectedImage(null);}} className="w-8 h-8 rounded-full border-2 border-gray-300 hover:border-green-500 hover:bg-green-50 hover:text-green-500 flex items-center justify-center transition"><Check size={16} /></button>
+                        )}
+                        <button onClick={(e) => deleteTask(task.id, e)} className="p-2 text-gray-300 hover:text-red-500 rounded-full transition-colors"><Trash2 size={16} /></button>
+                      </div>
+                    </div>
+                    {task.status === 'done' && task.photoUrl && (
+                      <div className="mt-2 rounded-lg overflow-hidden border border-gray-200 max-h-40 flex items-center justify-center bg-gray-100">
+                        <img src={task.photoUrl} alt="Beweisfoto" className="object-contain w-full h-full opacity-90" />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* --- TAB: PUTZEN --- */}
+          {activeTab === 'cleaning' && (
+            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2">
+              <div className="bg-gradient-to-br from-purple-600 to-indigo-600 p-6 rounded-2xl text-white shadow-lg">
+                <h2 className="text-xl font-bold flex items-center gap-2"><Sparkles /> Putz-Logbuch</h2>
+                <p className="opacity-80 text-sm">Zusatzeinkommen für {viewDate.toLocaleDateString('de-DE', {month:'long'})}</p>
+              </div>
+
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-200 space-y-3">
+                <div className="flex gap-2">
+                  <input type="date" className="bg-gray-50 rounded-xl px-3 py-2 text-sm outline-none flex-1" value={cleanDate} onChange={(e) => setCleanDate(e.target.value)} />
+                  <input type="number" step="1" placeholder="Minuten" className="bg-gray-50 rounded-xl px-3 py-2 text-sm outline-none w-28" value={cleanDuration} onChange={(e) => setCleanDuration(e.target.value)} />
+                </div>
+                <button onClick={addCleaning} className="w-full bg-purple-600 text-white font-bold py-2 rounded-xl text-sm hover:bg-purple-700 transition">Eintragen</button>
+              </div>
+
+              <div className="space-y-2">
+                {currentMonthTasks.filter(t => t.type === 'cleaning').map(t => (
+                  <div key={t.id} className="bg-white p-4 rounded-xl border border-gray-100 flex flex-col gap-2 shadow-sm transition-all">
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1 cursor-pointer" onClick={() => {setEditingTask(t); setSelectedImage(t.photoUrl || null);}}>
+                        <p className="font-semibold text-gray-800">Sonntagsputz</p>
+                        <p className="text-xs text-gray-500 flex gap-1 items-center">
+                            {formatDate(getValidDate(t))} • {t.duration} Min.
+                            {t.createdBy && <span className="bg-purple-50 text-purple-600 px-1 rounded text-[10px] uppercase font-bold">{t.createdBy}</span>}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1 sm:gap-2">
+                        <span className="font-bold text-purple-600 bg-purple-50 px-2 py-1 rounded text-sm">+{formatMoney((Number(t.duration) / 60) * RATE_CLEANING)}</span>
+                        <button onClick={(e) => deleteTask(t.id, e)} className="p-2 text-gray-300 hover:text-red-500"><Trash2 size={16}/></button>
+                      </div>
+                    </div>
+                    {t.photoUrl && (
+                      <div className="mt-1 rounded-lg overflow-hidden border border-gray-200 max-h-40 flex bg-gray-100">
+                        <img src={t.photoUrl} alt="Beweisfoto" className="object-contain w-full h-full opacity-90" />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* --- TAB: GELD (Ausgaben / Schulden) --- */}
+          {activeTab === 'expenses' && (
+            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2">
+              <div className="bg-gradient-to-br from-orange-500 to-red-500 p-6 rounded-2xl text-white shadow-lg">
+                <h2 className="text-xl font-bold flex items-center gap-2"><CreditCard /> Geldtransfer</h2>
+                <p className="opacity-90 text-sm">Einkäufe für die Eltern oder geliehenes Geld eintragen.</p>
+              </div>
+
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-200 space-y-4">
+                
+                {/* Toggle Plus/Minus */}
+                <div className="flex bg-gray-100 p-1 rounded-xl">
+                  <button 
+                    onClick={() => setExpenseType('plus')}
+                    className={`flex-1 py-2 text-sm font-bold rounded-lg flex items-center justify-center gap-1 transition-colors ${expenseType === 'plus' ? 'bg-white text-orange-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                  >
+                    <ArrowUpRight size={16} /> Ich bekomme (+)
+                  </button>
+                  <button 
+                    onClick={() => setExpenseType('minus')}
+                    className={`flex-1 py-2 text-sm font-bold rounded-lg flex items-center justify-center gap-1 transition-colors ${expenseType === 'minus' ? 'bg-white text-red-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                  >
+                    <ArrowDownRight size={16} /> Ich schulde (-)
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  <input type="text" placeholder={expenseType === 'plus' ? "Was hast du bezahlt? (z.B. Rewe)" : "Was wurde dir geliehen? (z.B. Kino)"} className="w-full bg-gray-50 rounded-xl px-4 py-3 text-sm outline-none border border-transparent focus:border-orange-300" value={expenseTitle} onChange={(e) => setExpenseTitle(e.target.value)} />
+                  <div className="flex gap-2">
+                    <input type="date" className="bg-gray-50 rounded-xl px-3 py-3 text-sm outline-none flex-1 border border-transparent focus:border-orange-300" value={expenseDate} onChange={(e) => setExpenseDate(e.target.value)} />
+                    <div className="relative w-28">
+                      <input type="number" step="0.01" placeholder="0,00" className="w-full bg-gray-50 rounded-xl pl-3 pr-8 py-3 text-sm outline-none border border-transparent focus:border-orange-300 font-bold" value={expenseAmount} onChange={(e) => setExpenseAmount(e.target.value)} />
+                      <span className="absolute right-3 top-3 text-gray-400 font-bold">€</span>
+                    </div>
+                  </div>
+                </div>
+                <button onClick={addExpense} className={`w-full text-white font-bold py-3 rounded-xl text-sm transition ${expenseType === 'plus' ? 'bg-orange-600 hover:bg-orange-700' : 'bg-red-600 hover:bg-red-700'}`}>
+                  {expenseType === 'plus' ? 'Ausgabe hinzufügen' : 'Schulden hinzufügen'}
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="font-bold text-gray-800 px-1 mt-4">Transaktionen in diesem Monat</h3>
+                {currentMonthTasks.filter(t => t.type === 'expense').length === 0 && <p className="text-gray-400 text-sm px-1">Keine Einträge.</p>}
+                
+                {currentMonthTasks.filter(t => t.type === 'expense').map(t => {
+                  const isDebt = t.expenseType === 'minus';
+                  return (
+                    <div key={t.id} className="bg-white p-4 rounded-xl border border-gray-100 flex justify-between items-center shadow-sm">
+                      <div className="flex-1 min-w-0 pr-2 cursor-pointer" onClick={() => setEditingTask(t)}>
+                        <p className="font-semibold text-gray-800 truncate">{t.title}</p>
+                        <p className="text-xs text-gray-500 flex gap-1 items-center">
+                            {formatDate(getValidDate(t))}
+                            {t.createdBy && <span className="bg-gray-100 px-1 rounded text-[10px] uppercase font-bold">{t.createdBy}</span>}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+                        <span className={`font-bold px-2 py-1 rounded text-sm ${isDebt ? 'text-red-600 bg-red-50' : 'text-orange-600 bg-orange-50'}`}>
+                          {isDebt ? '-' : '+'}{formatMoney(t.amount)}
+                        </span>
+                        <button onClick={(e) => deleteTask(t.id, e)} className="p-2 text-gray-300 hover:text-red-500"><Trash2 size={14}/></button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* --- TAB: HISTORY --- */}
+          {activeTab === 'history' && (
+            <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2">
+              <h3 className="font-bold text-gray-800 px-1">Monatsübersicht</h3>
+              {historyData.length === 0 && <div className="text-center py-10 text-gray-400 bg-white rounded-2xl border border-dashed">Noch keine Daten vorhanden.</div>}
+              
+              {historyData.map(([key, data]) => (
+                <div key={key} className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 flex justify-between items-center cursor-pointer hover:border-blue-300 transition"
+                      onClick={() => { setViewDate(data.dateObj); setActiveTab('current'); }}>
+                  <div>
+                    <h4 className="font-bold text-lg text-gray-800">{data.dateObj.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })}</h4>
+                    <p className="text-xs text-gray-500">{data.mins} Minuten gearbeitet</p>
+                  </div>
+                  <div className="text-right">
+                    <span className="block font-bold text-green-600 text-lg">{formatMoney(data.money)}</span>
+                    <span className="text-xs text-blue-500 flex items-center justify-end gap-1">Details ansehen <ChevronRight size={12}/></span>
+                  </div>
+                </div>
+              ))}
+              
+              <div className="pt-8">
+                 <button onClick={() => setShowInvoice(true)} className="w-full bg-gray-800 text-white font-bold py-3 rounded-xl hover:bg-gray-900 transition flex justify-center items-center gap-2">
+                    <FileText size={18} /> Aktuelle Abrechnung anzeigen
+                 </button>
+              </div>
+            </div>
+          )}
+
+        </main>
+
+        {/* EDIT MODAL */}
+        {editingTask && (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4 animate-in fade-in">
+            <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl animate-in slide-in-from-bottom-10 max-h-[90vh] overflow-y-auto">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="font-bold text-lg">Eintrag {editingTask.status === 'pending' ? 'abschließen' : 'bearbeiten'}</h3>
+                <button onClick={() => {setEditingTask(null); setSelectedImage(null);}} className="p-1 bg-gray-100 rounded-full"><X size={20}/></button>
+              </div>
+              
+              <div className="space-y-4">
+                {editingTask.type === 'expense' ? (
+                  <>
+                     <div className="flex bg-gray-100 p-1 rounded-xl mb-2">
+                        <button onClick={() => setEditingTask({...editingTask, expenseType: 'plus'})} className={`flex-1 py-1.5 text-xs font-bold rounded-lg ${editingTask.expenseType !== 'minus' ? 'bg-white text-orange-600 shadow-sm' : 'text-gray-400'}`}>Ich bekomme (+)</button>
+                        <button onClick={() => setEditingTask({...editingTask, expenseType: 'minus'})} className={`flex-1 py-1.5 text-xs font-bold rounded-lg ${editingTask.expenseType === 'minus' ? 'bg-white text-red-600 shadow-sm' : 'text-gray-400'}`}>Ich schulde (-)</button>
+                     </div>
+                    <div>
+                      <label className="text-xs text-gray-500 font-bold uppercase ml-1">Titel</label>
+                      <input type="text" className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold outline-none focus:ring-2 focus:ring-blue-500" value={editingTask.title} onChange={(e) => setEditingTask({...editingTask, title: e.target.value})} />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 font-bold uppercase ml-1">Betrag (€)</label>
+                      <input type="number" step="0.01" className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-lg font-bold outline-none focus:ring-2 focus:ring-blue-500" value={editingTask.amount} onChange={(e) => setEditingTask({...editingTask, amount: e.target.value})} />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <label className="text-xs text-gray-500 font-bold uppercase ml-1">Dauer in Minuten</label>
+                      <input type="number" step="1" autoFocus className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-lg font-bold outline-none focus:ring-2 focus:ring-blue-500" placeholder="z.B. 45" value={editingTask.duration} onChange={(e) => setEditingTask({...editingTask, duration: e.target.value})} />
+                    </div>
+                    
+                    {/* Routine Settings */}
+                    {editingTask.type === 'standard' && (
+                      <div className="bg-gray-50 p-3 rounded-xl border border-gray-200 mt-2 space-y-3">
+                        <label className="text-[10px] text-gray-500 font-bold uppercase flex items-center gap-1"><Repeat size={12}/> Wiederholung</label>
+                        <select 
+                          className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 outline-none text-sm focus:ring-2 focus:ring-blue-500"
+                          value={editingTask.routineType || 'none'}
+                          onChange={(e) => setEditingTask({...editingTask, routineType: e.target.value})}
+                        >
+                          <option value="none">Einmalig (Nicht wiederholen)</option>
+                          <option value="days">Alle X Tage</option>
+                          <option value="weeks">Alle X Wochen</option>
+                        </select>
+                        
+                        {editingTask.routineType && editingTask.routineType !== 'none' && (
+                          <div className="flex gap-2">
+                             <div className="flex-1">
+                               <label className="text-[10px] text-gray-500 font-bold uppercase">Wie oft?</label>
+                               <input type="number" min="1" className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm" value={editingTask.routineInterval || 1} onChange={e => setEditingTask({...editingTask, routineInterval: e.target.value})} />
+                             </div>
+                             <div className="flex-[2]">
+                               <label className="text-[10px] text-gray-500 font-bold uppercase">Bis wann? (Optional)</label>
+                               <input type="date" className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm" value={editingTask.routineEndDate || ''} onChange={e => setEditingTask({...editingTask, routineEndDate: e.target.value})} />
+                             </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Foto Upload */}
+                    {(editingTask.duration > 0 || editingTask.status === 'done') && (
+                       <div>
+                         <label className="text-xs text-gray-500 font-bold uppercase ml-1">Beweisfoto (Optional)</label>
+                         
+                         {selectedImage ? (
+                           <div className="mt-1 relative rounded-xl overflow-hidden border border-gray-200 h-32 group">
+                             <img src={selectedImage} alt="Vorschau" className="w-full h-full object-cover" />
+                             <button onClick={() => setSelectedImage(null)} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"><X size={14}/></button>
+                           </div>
+                         ) : (
+                           <div 
+                             onClick={() => fileInputRef.current.click()}
+                             className="mt-1 flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-xl py-6 bg-gray-50 cursor-pointer hover:bg-gray-100 transition-colors"
+                           >
+                             <Camera size={24} className="text-gray-400 mb-2" />
+                             <span className="text-xs text-gray-500 font-medium">Foto machen / auswählen</span>
+                           </div>
+                         )}
+                         <input 
+                           type="file" 
+                           accept="image/*" 
+                           capture="environment"
+                           className="hidden" 
+                           ref={fileInputRef}
+                           onChange={handleImageUpload}
+                         />
+                       </div>
+                    )}
+                  </>
+                )}
+                
+                <div>
+                  <label className="text-xs text-gray-500 font-bold uppercase ml-1">Datum</label>
+                  <input 
+                    type="date" 
+                    className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                    value={editingTask.completedDate ? editingTask.completedDate.split('T')[0] : (editingTask.dueDate || new Date().toISOString().split('T')[0])}
+                    onChange={(e) => setEditingTask({...editingTask, completedDate: e.target.value, dueDate: e.target.value})} 
+                  />
+                </div>
+
+                <button onClick={saveEdit} className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition">
+                  {editingTask.status === 'pending' ? 'Als erledigt speichern' : 'Änderungen speichern'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* === INVOICE / PRINT VIEW MODAL === */}
+      {showInvoice && (
+        <div className="fixed inset-0 bg-white z-[100] overflow-y-auto">
+          
+          <div className="sticky top-0 bg-gray-100 border-b border-gray-300 p-4 flex justify-between items-center print:hidden">
+            <button onClick={() => setShowInvoice(false)} className="bg-white px-4 py-2 rounded-lg font-medium shadow-sm hover:bg-gray-50 border border-gray-200">
+              Zurück
+            </button>
+            <div className="flex gap-2">
+              <button onClick={copyInvoiceText} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-medium shadow-sm hover:bg-blue-700 flex items-center gap-2">
+                <Download size={18} /> Kopieren
+              </button>
+              <button onClick={handlePrint} className="bg-gray-800 text-white px-4 py-2 rounded-lg font-medium shadow-sm hover:bg-gray-900 flex items-center gap-2">
+                <Printer size={18} /> Drucken / PDF
+              </button>
+            </div>
+          </div>
+
+          <div className="max-w-2xl mx-auto p-8 bg-white text-black font-sans print:p-0">
+            
+            <div className="border-b-2 border-gray-800 pb-4 mb-8 flex justify-between items-end">
+              <div>
+                <h1 className="text-3xl font-extrabold text-gray-900">Abrechnung</h1>
+                <p className="text-lg text-gray-600 mt-1">
+                  Zeitraum: {viewDate.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })}
+                </p>
+              </div>
+              <div className="text-right text-sm">
+                <p className="font-bold">Erstellt von: {userName || 'Anonym'}</p>
+                <p>Datum: {new Date().toLocaleDateString('de-DE')}</p>
+              </div>
+            </div>
+
+            <h2 className="text-xl font-bold mb-3 text-gray-800 border-b pb-1">🏠 Haushalt ({formatMoney(RATE_STANDARD)}/Std)</h2>
+            <table className="w-full text-left border-collapse mb-8 text-sm">
+              <thead>
+                <tr className="bg-gray-100 border-b border-gray-300">
+                  <th className="p-2 w-24">Datum</th>
+                  <th className="p-2">Aufgabe</th>
+                  <th className="p-2 text-right w-24">Dauer</th>
+                  <th className="p-2 text-right w-32">Betrag</th>
+                </tr>
+              </thead>
+              <tbody>
+                {currentMonthTasks.filter(t => t.type === 'standard' && t.status === 'done').map((t, i) => (
+                  <tr key={i} className="border-b border-gray-200">
+                    <td className="p-2">{formatDate(getValidDate(t))}</td>
+                    <td className="p-2">{t.title}</td>
+                    <td className="p-2 text-right">{t.duration} Min.</td>
+                    <td className="p-2 text-right">{formatMoney((Number(t.duration)/60) * RATE_STANDARD)}</td>
+                  </tr>
+                ))}
+                {currentMonthTasks.filter(t => t.type === 'standard' && t.status === 'done').length === 0 && (
+                  <tr><td colSpan="4" className="p-2 text-center text-gray-400 italic">Keine Einträge vorhanden</td></tr>
+                )}
+                <tr className="font-bold bg-gray-50 border-t-2 border-gray-300">
+                  <td colSpan="2" className="p-2 text-right">Summe Haushalt:</td>
+                  <td className="p-2 text-right">{stats.stdMins} Min.</td>
+                  <td className="p-2 text-right text-blue-700">{formatMoney(stats.moneyLaborStandard)}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h2 className="text-xl font-bold mb-3 text-gray-800 border-b pb-1">🧹 Putzen ({formatMoney(RATE_CLEANING)}/Std)</h2>
+            <table className="w-full text-left border-collapse mb-8 text-sm">
+              <thead>
+                <tr className="bg-gray-100 border-b border-gray-300">
+                  <th className="p-2 w-24">Datum</th>
+                  <th className="p-2">Beschreibung</th>
+                  <th className="p-2 text-right w-24">Dauer</th>
+                  <th className="p-2 text-right w-32">Betrag</th>
+                </tr>
+              </thead>
+              <tbody>
+                {currentMonthTasks.filter(t => t.type === 'cleaning').map((t, i) => (
+                  <tr key={i} className="border-b border-gray-200">
+                    <td className="p-2">{formatDate(getValidDate(t))}</td>
+                    <td className="p-2">{t.title}</td>
+                    <td className="p-2 text-right">{t.duration} Min.</td>
+                    <td className="p-2 text-right">{formatMoney((Number(t.duration)/60) * RATE_CLEANING)}</td>
+                  </tr>
+                ))}
+                {currentMonthTasks.filter(t => t.type === 'cleaning').length === 0 && (
+                  <tr><td colSpan="4" className="p-2 text-center text-gray-400 italic">Keine Einträge vorhanden</td></tr>
+                )}
+                <tr className="font-bold bg-gray-50 border-t-2 border-gray-300">
+                  <td colSpan="2" className="p-2 text-right">Summe Putzen:</td>
+                  <td className="p-2 text-right">{stats.cleanMins} Min.</td>
+                  <td className="p-2 text-right text-purple-700">{formatMoney(stats.moneyLaborCleaning)}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h2 className="text-xl font-bold mb-3 text-gray-800 border-b pb-1">💳 Geldtransfer (Auslagen & Schulden)</h2>
+            <table className="w-full text-left border-collapse mb-12 text-sm">
+              <thead>
+                <tr className="bg-gray-100 border-b border-gray-300">
+                  <th className="p-2 w-24">Datum</th>
+                  <th className="p-2">Beschreibung</th>
+                  <th className="p-2 text-right w-32">Betrag</th>
+                </tr>
+              </thead>
+              <tbody>
+                {currentMonthTasks.filter(t => t.type === 'expense').map((t, i) => {
+                  const isDebt = t.expenseType === 'minus';
+                  return (
+                    <tr key={i} className={`border-b border-gray-200 ${isDebt ? 'text-red-700' : 'text-orange-700'}`}>
+                      <td className="p-2">{formatDate(getValidDate(t))}</td>
+                      <td className="p-2">{t.title} {isDebt ? '(Schulden)' : '(Auslage)'}</td>
+                      <td className="p-2 text-right">{isDebt ? '-' : '+'}{formatMoney(Number(t.amount))}</td>
+                    </tr>
+                  )
+                })}
+                {currentMonthTasks.filter(t => t.type === 'expense').length === 0 && (
+                  <tr><td colSpan="3" className="p-2 text-center text-gray-400 italic">Keine Einträge vorhanden</td></tr>
+                )}
+                <tr className="font-bold bg-gray-50 border-t-2 border-gray-300">
+                  <td colSpan="2" className="p-2 text-right">Netto Differenz:</td>
+                  <td className={`p-2 text-right ${stats.netExpenses < 0 ? 'text-red-700' : 'text-orange-700'}`}>
+                    {stats.netExpenses > 0 ? '+' : ''}{formatMoney(stats.netExpenses)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div className="flex justify-end mt-12 break-inside-avoid">
+              <div className="w-80 bg-gray-50 p-6 rounded-xl border-2 border-gray-800 shadow-md">
+                <div className="flex justify-between items-center mb-2">
+                  <p className="text-sm font-bold text-gray-600">Gesamtauszahlung:</p>
+                </div>
+                <h2 className="text-5xl font-extrabold text-gray-900 text-right">{formatMoney(stats.totalPayout)}</h2>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+};
+
+export default App;
+
+
+```
